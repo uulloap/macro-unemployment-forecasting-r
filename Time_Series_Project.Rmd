@@ -1,0 +1,1203 @@
+---
+title: "MA611 Final Project"
+author: "Uriel Ulloa"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: hide # Allows user to hide/show code chunks in the report
+    theme: cosmo # A clean, professional theme
+    highlight: tango
+---
+
+## 1. Setup and Data Loading
+
+#### This chunk is the project setup. It loads all required R packages (like forecast, tsibble, prophet) and then imports the four regional unemployment datasets from their respective Excel files. Finally, it combines them into a single, clean data object called a tsibble, which is R's modern format for time series analysis.
+
+``` {r data}
+
+## 1. Data Loading and Preparation
+
+# Load necessary libraries
+library(readxl)
+library(tidyverse)
+library(tsibble) 
+library(lubridate)
+library(feasts) 
+library(fable)
+library(dplyr)
+library(forecast)
+library(fpp2)
+library(ggplot2)
+library(strucchange) # For automatic breakpoint detection
+library(prophet)
+library(zoo) # Used for Prophet date conversion
+
+# 1. Load the data files (UPDATE THESE PATHS)
+midwest <- read_excel("/Users/urielulloa/Desktop/Time_Series_Project/Midwest.xlsx", sheet = "Monthly") %>%
+  rename(Midwest = CMWRUR) # Rename the series for clarity
+
+northeast <- read_excel("/Users/urielulloa/Desktop/Time_Series_Project/Northeast.xlsx", sheet = "Monthly") %>%
+  rename(Northeast = CNERUR)
+
+south <- read_excel("/Users/urielulloa/Desktop/Time_Series_Project/South.xlsx", sheet = "Monthly") %>%
+  rename(South = CSOUUR)
+
+west <- read_excel("/Users/urielulloa/Desktop/Time_Series_Project/West.xlsx", sheet = "Monthly") %>%
+  rename(West = CWSTUR)
+
+# 2. Combine the datasets and convert to a tsibble (UNCHANGED)
+unemployment_data <- midwest %>%
+  left_join(northeast, by = "observation_date") %>%
+  left_join(south, by = "observation_date") %>%
+  left_join(west, by = "observation_date") %>%
+  mutate(observation_date = ymd(observation_date)) %>%
+  as_tsibble(index = observation_date)
+
+print(unemployment_data)
+
+```
+
+## 2. Exploratory Data Analysis (EDA)
+
+``` {r eda_plot}
+# Long format is preferred for ggplot/tsibble plotting
+unemployment_long <- unemployment_data %>%
+  pivot_longer(-observation_date, names_to = "Region", values_to = "Rate")
+
+# Plot all four series on the same graph
+unemployment_long %>%
+  autoplot(Rate) +
+  geom_smooth(method = "loess", se = FALSE, color = "black") + 
+  labs(
+    title = "Unemployment Rate Trends by US Census Region (1976-Present)",
+    y = "Unemployment Rate (%)"
+  ) +
+  facet_grid(Region ~ .) # Plot each region in its own panel
+```
+#### This chunk is for Exploratory Data Analysis (EDA). It converts the data to a "long" format, making it easier to plot, and then generates a visual chart showing the unemployment rate trend for all four regions from 1976 to the present. This helps visually identify major peaks (recessions) and structural changes.
+## 3. 
+
+## 3. Data Transformation and Breakpoint Analysis
+
+### 3.1. Convert to TS
+
+``` {r 3}
+df_unemp <- unemployment_data
+start_date <- c(1976, 1)
+
+# Create full Time Series (ts) Objects (UNCHANGED)
+midwest.ts <- ts(df_unemp$Midwest, start = start_date, frequency = 12)
+northeast.ts <- ts(df_unemp$Northeast, start = start_date, frequency = 12)
+south.ts <- ts(df_unemp$South, start = start_date, frequency = 12)
+west.ts <- ts(df_unemp$West, start = start_date, frequency = 12)
+```
+
+#### Since some modeling functions (like forecast::ets and strucchange::breakpoints) work best with the older ts (time series) object format, this chunk simply converts the regional data into this format for later use. It's hidden (include=FALSE) because it only prepares data structures, producing no direct output.
+
+### 3.2. Automatic Structural Break Detection. 
+
+``` {r 4}
+
+## 5.1 Formal Statistical Break Test (on Entire Series)
+
+# Load the necessary library (already loaded in setup, but included for context)
+library(strucchange) 
+
+# Test for breaks in the mean (level) of the series using the FULL TIME SERIES. 
+# h=0.15 is the minimum segment size.
+
+bp.fit.midwest <- breakpoints(midwest.ts ~ 1, h = 0.15) 
+print("Midwest - Statistically Identified Break Dates (Entire Series):")
+print(breakdates(bp.fit.midwest)) 
+
+bp.fit.northeast <- breakpoints(northeast.ts ~ 1, h = 0.15) 
+print("Northeast - Statistically Identified Break Dates (Entire Series):")
+print(breakdates(bp.fit.northeast)) 
+
+bp.fit.south <- breakpoints(south.ts ~ 1, h = 0.15) 
+print("South - Statistically Identified Break Dates (Entire Series):")
+print(breakdates(bp.fit.south)) 
+
+bp.fit.west <- breakpoints(west.ts ~ 1, h = 0.15) 
+print("West - Statistically Identified Break Dates (Entire Series):")
+print(breakdates(bp.fit.west)) 
+
+# 5.1.1 Visualization of Structural Breaks
+# The plots now use the full time series objects.
+plot(midwest.ts, main = "Midwest Rate with Detected Structural Breaks (Entire Series)")
+lines(bp.fit.midwest, col = "red")
+plot(northeast.ts, main = "Northeast Rate with Detected Structural Breaks (Entire Series)")
+lines(bp.fit.northeast, col = "red")
+plot(south.ts, main = "South Rate with Detected Structural Breaks (Entire Series)")
+lines(bp.fit.south, col = "red")
+plot(west.ts, main = "West Rate with Detected Structural Breaks (Entire Series)")
+lines(bp.fit.west, col = "red")
+
+```
+#### This uses the strucchange package to statistically identify points in the historical data where the average unemployment rate level significantly changed. The results help confirm the major structural shifts (like recessions) that inform the three chosen forecast test segments.
+
+
+### 3.3. Segmenting Data (3 Scenarios) 
+
+``` {r 5}
+## 5. Time Series Data Preparation and Segmentation
+
+# --- PRE-REQUISITES (Assuming data is loaded and merged into df_unemp) ---
+
+df_unemp <- unemployment_data
+start_date <- c(1976, 1) # Start date for all series
+
+# Create full Time Series (ts) Objects (Unchanged)
+midwest.ts <- ts(df_unemp$Midwest, start = start_date, frequency = 12)
+northeast.ts <- ts(df_unemp$Northeast, start = start_date, frequency = 12)
+south.ts <- ts(df_unemp$South, start = start_date, frequency = 12)
+west.ts <- ts(df_unemp$West, start = start_date, frequency = 12)
+
+# --- Define Fixed Breakpoints and Horizon ---
+h_horizon <- 12 # 1 year test horizon (12 months)
+
+# ====================================================
+# SEGMENT 1: GREAT RECESSION (2008) TEST (Unchanged)
+# Train: Start to 2007-12 | Test: 2008-01 to 2008-12
+# ====================================================
+recession_test_start <- c(2008, 1) 
+recession_train_end <- c(2007, 12)
+
+# Training Sets S1
+train.midwest.S1 <- window(midwest.ts, end = recession_train_end) 
+train.northeast.S1 <- window(northeast.ts, end = recession_train_end) 
+train.south.S1 <- window(south.ts, end = recession_train_end) 
+train.west.S1 <- window(west.ts, end = recession_train_end) 
+
+# Test Sets S1 (12 months)
+test.midwest.S1 <- window(midwest.ts, start = recession_test_start, end = c(2008, 12))
+test.northeast.S1 <- window(northeast.ts, start = recession_test_start, end = c(2008, 12))
+test.south.S1 <- window(south.ts, start = recession_test_start, end = c(2008, 12))
+test.west.S1 <- window(west.ts, start = recession_test_start, end = c(2008, 12))
+
+# ====================================================
+# SEGMENT 2: INTER-CRISIS STABILITY (2019) TEST (Unchanged)
+# Train: Start to 2018-12 | Test: 2019-01 to 2019-12
+# ====================================================
+stability_test_start <- c(2019, 1) 
+stability_train_end <- c(2018, 12)
+
+# Training Sets S2
+train.midwest.S2 <- window(midwest.ts, end = stability_train_end) 
+train.northeast.S2 <- window(northeast.ts, end = stability_train_end) 
+train.south.S2 <- window(south.ts, end = stability_train_end) 
+train.west.S2 <- window(west.ts, end = stability_train_end) 
+
+# Test Sets S2 (12 months)
+test.midwest.S2 <- window(midwest.ts, start = stability_test_start, end = c(2019, 12))
+test.northeast.S2 <- window(northeast.ts, start = stability_test_start, end = c(2019, 12))
+test.south.S2 <- window(south.ts, start = stability_test_start, end = c(2019, 12))
+test.west.S2 <- window(west.ts, start = stability_test_start, end = c(2019, 12))
+
+# ====================================================
+# SEGMENT 3: COVID SHOCK & MODERN ERA TEST (Fixed Dates) ✅
+# Train: 2020-01 to 2024-07 | Test: 2024-08 to 2025-08
+# ====================================================
+S3_train_start <- c(2020, 1)
+S3_train_end <- c(2024, 7)
+
+S3_test_start <- c(2024, 8) 
+S3_test_end <- c(2025, 7) # Adjusted to 12 months for h_horizon consistency (Aug 2024 to Jul 2025)
+
+# Training Sets S3
+train.midwest.S3 <- window(midwest.ts, start = S3_train_start, end = S3_train_end)
+train.northeast.S3 <- window(northeast.ts, start = S3_train_start, end = S3_train_end)
+train.south.S3 <- window(south.ts, start = S3_train_start, end = S3_train_end)
+train.west.S3 <- window(west.ts, start = S3_train_start, end = S3_train_end)
+
+# Test Sets S3 (12 months: Aug 2024 to Jul 2025)
+test.midwest.S3 <- window(midwest.ts, start = S3_test_start, end = S3_test_end)
+test.northeast.S3 <- window(northeast.ts, start = S3_test_start, end = S3_test_end)
+test.south.S3 <- window(south.ts, start = S3_test_start, end = S3_test_end)
+test.west.S3 <- window(west.ts, start = S3_test_start, end = S3_test_end)
+
+# --- Verification ---
+print(paste("S1 Midwest Test Length:", length(test.midwest.S1)))
+print(paste("S2 Midwest Test Length:", length(test.midwest.S2)))
+print(paste("S3 Midwest Test Length:", length(test.midwest.S3)))
+print(paste("S3 Midwest Train Start:", start(train.midwest.S3)[1], "-", start(train.midwest.S3)[2]))
+print(paste("S3 Midwest Test Start:", start(test.midwest.S3)[1], "-", start(test.midwest.S3)[2]))
+print(paste("S3 Midwest Test End:", end(test.midwest.S3)[1], "-", end(test.midwest.S3)[2]))
+```
+#### This is the crucial step of cross-validation. It systematically splits the full time series into three pairs of training and testing datasets:
+
+####    Segment 1 (S1): Tests forecasting accuracy during a major economic shock (2008 Recession).
+
+####    Segment 2 (S2): Tests forecasting accuracy during a stable period (2019).
+
+####    Segment 3 (S3): Tests forecasting accuracy in the modern, post-COVID era (2024-2025).
+
+## 4. Model Pre-Processing: Stationarity & ACF
+
+### 4.1. Stationarity Check
+
+``` {r Stationary_Check}
+
+
+## 4.2. Stationarity and Autocorrelation Check (ndiffs)
+
+# The ndiffs() function determines the number of non-seasonal differences required for stationarity.
+
+# --- Segment 1 (S1) ndiffs (Pre-Recession Data) ---
+print("--- Segment 1 (S1) ndiffs (d) ---")
+d_order.midwest.S1 <- ndiffs(train.midwest.S1); print(paste("Midwest S1 ndiffs (d):", d_order.midwest.S1))
+d_order.northeast.S1 <- ndiffs(train.northeast.S1); print(paste("Northeast S1 ndiffs (d):", d_order.northeast.S1))
+d_order.south.S1 <- ndiffs(train.south.S1); print(paste("South S1 ndiffs (d):", d_order.south.S1))
+d_order.west.S1 <- ndiffs(train.west.S1); print(paste("West S1 ndiffs (d):", d_order.west.S1))
+
+# --- Segment 2 (S2) ndiffs (Inter-Crisis Stability Data) ---
+print("--- Segment 2 (S2) ndiffs (d) ---")
+d_order.midwest.S2 <- ndiffs(train.midwest.S2); print(paste("Midwest S2 ndiffs (d):", d_order.midwest.S2))
+d_order.northeast.S2 <- ndiffs(train.northeast.S2); print(paste("Northeast S2 ndiffs (d):", d_order.northeast.S2))
+d_order.south.S2 <- ndiffs(train.south.S2); print(paste("South S2 ndiffs (d):", d_order.south.S2))
+d_order.west.S2 <- ndiffs(train.west.S2); print(paste("West S2 ndiffs (d):", d_order.west.S2))
+
+# --- Segment 3 (S3) ndiffs (Pre-COVID Data) ---
+print("--- Segment 3 (S3) ndiffs (d) ---")
+d_order.midwest.S3 <- ndiffs(train.midwest.S3); print(paste("Midwest S3 ndiffs (d):", d_order.midwest.S3))
+d_order.northeast.S3 <- ndiffs(train.northeast.S3); print(paste("Northeast S3 ndiffs (d):", d_order.northeast.S3))
+d_order.south.S3 <- ndiffs(train.south.S3); print(paste("South S3 ndiffs (d):", d_order.south.S3))
+d_order.west.S3 <- ndiffs(train.west.S3); print(paste("West S3 ndiffs (d):", d_order.west.S3))
+```
+
+#### The ndiffs function checks how many times the data needs to be differenced (subtracted from the previous value) to become stationary (meaning its statistical properties don't change over time). This determines the d parameter for the ARIMA model.
+
+## 4.2. ACF/PACF Check
+
+
+``` {r 7}
+
+
+# Plot ACF/PACF of the DIFFERENCED series using the largest training set (S3)
+# This helps confirm the p and q orders for ARIMA.
+
+# Midwest
+if (d_order.midwest.S3 > 0) {
+  ggAcf(diff(train.midwest.S3, lag = d_order.midwest.S3)) + ggtitle("ACF of Differenced Midwest Rate (S3)")
+  ggPacf(diff(train.midwest.S3, lag = d_order.midwest.S3)) + ggtitle("PACF of Differenced Midwest Rate (S3)")
+}
+
+# Northeast
+if (d_order.northeast.S3 > 0) {
+  ggAcf(diff(train.northeast.S3, lag = d_order.northeast.S3)) + ggtitle("ACF of Differenced Northeast Rate (S3)")
+  ggPacf(diff(train.northeast.S3, lag = d_order.northeast.S3)) + ggtitle("PACF of Differenced Northeast Rate (S3)")
+}
+
+# South
+if (d_order.south.S3 > 0) {
+  ggAcf(diff(train.south.S3, lag = d_order.south.S3)) + ggtitle("ACF of Differenced South Rate (S3)")
+  ggPacf(diff(train.south.S3, lag = d_order.south.S3)) + ggtitle("PACF of Differenced South Rate (S3)")
+}
+
+# West
+if (d_order.west.S3 > 0) {
+  ggAcf(diff(train.west.S3, lag = d_order.west.S3)) + ggtitle("ACF of Differenced West Rate (S3)")
+  ggPacf(diff(train.west.S3, lag = d_order.west.S3)) + ggtitle("PACF of Differenced West Rate (S3)")
+}
+```
+#### These plots help identify the remaining structure in the data after differencing. The ACF (Autocorrelation Function) determines the q (Moving Average) order, and the PACF (Partial Autocorrelation Function) determines the p (Autoregressive) order for the ARIMA model.
+
+## 4.3. COVID-19 XREG Impulse Creation 
+
+```{r COVID}
+## 8 (Revised for COVID Impulse Train)
+
+# 5.2 Create External Regressor (XREG) for COVID-19 Shock (2020-2021)
+
+# Define the start time of the full unemployment series
+start_time <- c(1976, 1)
+
+# Create the full time index
+full_time_index <- time(midwest.ts) 
+
+# --- Create the three impulse regressors (xreg) for the peak months ---
+# April 2020 (The highest peak: 2020 + (4 - 1)/12)
+impulse_apr <- ifelse(full_time_index == (2020 + 3/12), 1, 0) 
+# May 2020 (Second peak: 2020 + (5 - 1)/12)
+impulse_may <- ifelse(full_time_index == (2020 + 4/12), 1, 0)
+# June 2020 (Third peak: 2020 + (6 - 1)/12)
+impulse_jun <- ifelse(full_time_index == (2020 + 5/12), 1, 0)
+
+# Combine them into a matrix for the full series, renaming columns for clarity
+covid_impulse_train <- cbind(
+  APR20_Impulse = ts(impulse_apr, start = start_time, frequency = 12),
+  MAY20_Impulse = ts(impulse_may, start = start_time, frequency = 12),
+  JUN20_Impulse = ts(impulse_jun, start = start_time, frequency = 12)
+)
+
+
+# Split the impulse matrix into training and test sets for all three segments:
+
+# --- Segment 1 (Recession) ---
+# Train: Start to 2007-12 (All Zeros)
+xreg.train.S1 <- window(covid_impulse_train, end = c(2007, 12)) 
+# Test: 2008-01 to 2008-12 (All Zeros)
+xreg.test.S1 <- window(covid_impulse_train, start = c(2008, 1), end = c(2008, 12)) 
+
+
+# --- Segment 2 (Inter-Crisis Stability) ---
+# Train: Start to 2018-12 (All Zeros)
+xreg.train.S2 <- window(covid_impulse_train, end = c(2018, 12)) 
+# Test: 2019-01 to 2019-12 (All Zeros)
+xreg.test.S2 <- window(covid_impulse_train, start = c(2019, 1), end = c(2019, 12)) 
+
+
+# --- Segment 3 (COVID Shock) ---
+# Train: Start to 2020-02 (All Zeros)
+xreg.train.S3 <- window(covid_impulse_train, end = c(2020, 2)) 
+# Test: 2020-03 to 2021-02 (Contains the three "1" spikes)
+xreg.test.S3 <- window(covid_impulse_train, start = c(2020, 3), end = c(2021, 2))
+```
+
+#### This chunk creates an external regressor (XREG) variable to capture the extreme spike caused by the COVID-19 initial shock (April-June 2020). This XREG is used later in the ARIMA model to prevent this one-off event from distorting the regular time series structure. It then splits this XREG into matching training and test sets for the three segments.
+
+## 5. Model Fitting: Naive & ETS
+
+### 5.1. Naive Benchmark Model
+
+```{r 10}
+
+## 6. Naive Benchmark (3-Segment Evaluation)
+
+h_horizon <- 12 # Fixed 12-month forecast horizon for all test sets
+
+# ====================================================
+# SEGMENT 1: GREAT RECESSION (2008) TEST
+# ====================================================
+print("--- Segment 1: Naive Model Fits (Recession Test) ---")
+
+# 1. FIT MODELS
+naive.forecast.midwest.S1 <- naive(train.midwest.S1, h = h_horizon)
+naive.forecast.northeast.S1 <- naive(train.northeast.S1, h = h_horizon)
+naive.forecast.south.S1 <- naive(train.south.S1, h = h_horizon)
+naive.forecast.west.S1 <- naive(train.west.S1, h = h_horizon)
+
+# 2. CALCULATE ACCURACY
+print("--- Segment 1: Naive Model Accuracy (Recession Test) ---")
+naive_accuracy_midwest.S1 <- accuracy(naive.forecast.midwest.S1, test.midwest.S1); print("Midwest S1:"); print(naive_accuracy_midwest.S1)
+naive_accuracy_northeast.S1 <- accuracy(naive.forecast.northeast.S1, test.northeast.S1); print("Northeast S1:"); print(naive_accuracy_northeast.S1)
+naive_accuracy_south.S1 <- accuracy(naive.forecast.south.S1, test.south.S1); print("South S1:"); print(naive_accuracy_south.S1)
+naive_accuracy_west.S1 <- accuracy(naive.forecast.west.S1, test.west.S1); print("West S1:"); print(naive_accuracy_west.S1)
+
+
+# ====================================================
+# SEGMENT 2: INTER-CRISIS STABILITY (2019) TEST
+# ====================================================
+print("--- Segment 2: Naive Model Fits (Stability Test) ---")
+
+# 1. FIT MODELS
+naive.forecast.midwest.S2 <- naive(train.midwest.S2, h = h_horizon)
+naive.forecast.northeast.S2 <- naive(train.northeast.S2, h = h_horizon)
+naive.forecast.south.S2 <- naive(train.south.S2, h = h_horizon)
+naive.forecast.west.S2 <- naive(train.west.S2, h = h_horizon)
+
+# 2. CALCULATE ACCURACY
+print("--- Segment 2: Naive Model Accuracy (Stability Test) ---")
+naive_accuracy_midwest.S2 <- accuracy(naive.forecast.midwest.S2, test.midwest.S2); print("Midwest S2:"); print(naive_accuracy_midwest.S2)
+naive_accuracy_northeast.S2 <- accuracy(naive.forecast.northeast.S2, test.northeast.S2); print("Northeast S2:"); print(naive_accuracy_northeast.S2)
+naive_accuracy_south.S2 <- accuracy(naive.forecast.south.S2, test.south.S2); print("South S2:"); print(naive_accuracy_south.S2)
+naive_accuracy_west.S2 <- accuracy(naive.forecast.west.S2, test.west.S2); print("West S2:"); print(naive_accuracy_west.S2)
+
+
+# ====================================================
+# SEGMENT 3: COVID SHOCK (2020) TEST
+# ====================================================
+print("--- Segment 3: Naive Model Fits (COVID Test) ---")
+
+# 1. FIT MODELS
+naive.forecast.midwest.S3 <- naive(train.midwest.S3, h = h_horizon)
+naive.forecast.northeast.S3 <- naive(train.northeast.S3, h = h_horizon)
+naive.forecast.south.S3 <- naive(train.south.S3, h = h_horizon)
+naive.forecast.west.S3 <- naive(train.west.S3, h = h_horizon)
+
+# 2. CALCULATE ACCURACY
+print("--- Segment 3: Naive Model Accuracy (COVID Test) ---")
+naive_accuracy_midwest.S3 <- accuracy(naive.forecast.midwest.S3, test.midwest.S3); print("Midwest S3:"); print(naive_accuracy_midwest.S3)
+naive_accuracy_northeast.S3 <- accuracy(naive.forecast.northeast.S3, test.northeast.S3); print("Northeast S3:"); print(naive_accuracy_northeast.S3)
+naive_accuracy_south.S3 <- accuracy(naive.forecast.south.S3, test.south.S3); print("South S3:"); print(naive_accuracy_south.S3)
+naive_accuracy_west.S3 <- accuracy(naive.forecast.west.S3, test.west.S3); print("West S3:"); print(naive_accuracy_west.S3)
+```
+
+#### The Naive model simply forecasts the next value to be equal to the last known value. It's the simplest benchmark model used to establish a baseline. If a complex model (like ARIMA) cannot beat the Naive model's error metrics (MAPE, RMSE), it's not worth using.
+
+### 5.2. Exponential Smoothing (ETS) Model: 
+
+``` {r 11}
+
+## 7.1. Exponential Smoothing (ETS) Model (3-Segment Evaluation)
+
+h_horizon <- 12 # Fixed 12-month forecast horizon for all test sets
+
+# We use model="AAN" (Additive Error, Additive Trend, No Seasonality) as specified, 
+# relying on ETS to select the optimal parameters (alpha, beta, phi) within that structure.
+
+# ====================================================
+# 1. SEGMENT 1: GREAT RECESSION (2008) TEST
+# ====================================================
+print("--- Segment 1: ETS Model Fits ---")
+# --- Fit Models ---
+ets.fit.midwest.S1 <- ets(train.midwest.S1, model = "AAN") 
+ets.fit.northeast.S1 <- ets(train.northeast.S1, model = "AAN")
+ets.fit.south.S1 <- ets(train.south.S1, model = "AAN")
+ets.fit.west.S1 <- ets(train.west.S1, model = "AAN")
+
+# --- Generate Forecasts ---
+ets.forecast.midwest.S1 <- forecast(ets.fit.midwest.S1, h = h_horizon)
+ets.forecast.northeast.S1 <- forecast(ets.fit.northeast.S1, h = h_horizon)
+ets.forecast.south.S1 <- forecast(ets.fit.south.S1, h = h_horizon)
+ets.forecast.west.S1 <- forecast(ets.fit.west.S1, h = h_horizon)
+
+
+# ====================================================
+# 2. SEGMENT 2: INTER-CRISIS STABILITY (2019) TEST
+# ====================================================
+print("--- Segment 2: ETS Model Fits ---")
+# --- Fit Models ---
+ets.fit.midwest.S2 <- ets(train.midwest.S2, model = "AAN") 
+ets.fit.northeast.S2 <- ets(train.northeast.S2, model = "AAN")
+ets.fit.south.S2 <- ets(train.south.S2, model = "AAN")
+ets.fit.west.S2 <- ets(train.west.S2, model = "AAN")
+
+# --- Generate Forecasts ---
+ets.forecast.midwest.S2 <- forecast(ets.fit.midwest.S2, h = h_horizon)
+ets.forecast.northeast.S2 <- forecast(ets.fit.northeast.S2, h = h_horizon)
+ets.forecast.south.S2 <- forecast(ets.fit.south.S2, h = h_horizon)
+ets.forecast.west.S2 <- forecast(ets.fit.west.S2, h = h_horizon)
+
+
+# ====================================================
+# 3. SEGMENT 3: COVID SHOCK (2020) TEST
+# ====================================================
+print("--- Segment 3: ETS Model Fits ---")
+# --- Fit Models ---
+ets.fit.midwest.S3 <- ets(train.midwest.S3, model = "AAN") 
+ets.fit.northeast.S3 <- ets(train.northeast.S3, model = "AAN")
+ets.fit.south.S3 <- ets(train.south.S3, model = "AAN")
+ets.fit.west.S3 <- ets(train.west.S3, model = "AAN")
+
+# --- Generate Forecasts ---
+ets.forecast.midwest.S3 <- forecast(ets.fit.midwest.S3, h = h_horizon)
+ets.forecast.northeast.S3 <- forecast(ets.fit.northeast.S3, h = h_horizon)
+ets.forecast.south.S3 <- forecast(ets.fit.south.S3, h = h_horizon)
+ets.forecast.west.S3 <- forecast(ets.fit.west.S3, h = h_horizon)
+
+
+# --- Diagnostics (Check Residuals for S3, the most comprehensive fit) ---
+print("--- ETS Residual Diagnostics (Using S3 Fits) ---")
+checkresiduals(ets.fit.midwest.S3)
+checkresiduals(ets.fit.northeast.S3)
+checkresiduals(ets.fit.south.S3)
+checkresiduals(ets.fit.west.S3)
+```
+
+#### The ETS (Error, Trend, Seasonality) model uses exponential weighting to forecast, giving more importance to recent observations. It is a powerful smoothing method. Here, you fix the model type to AAN (Additive Error, Additive Trend, No Seasonality), which is suitable for non-seasonal data with a changing level, and then check the residuals (leftover errors) to ensure the model captured all the pattern.
+
+## 6. Model Fitting: ARIMA, NNETAR
+
+### 6.1. ARIMA Model Implementation
+
+``` {R ARINMA}
+## 7.2. ARIMA Model Implementation (FINAL STABLE VERSION)
+
+h_horizon <- 12 # Fixed 12-month forecast horizon for all test sets
+
+# ====================================================
+# STEP 1: Find Optimal Orders (p, d, q)
+# ====================================================
+print("--- Step 1: Finding Optimal ARIMA Orders (p, d, q) ---")
+
+# --- Segment 1 Orders (No XREG) ---
+best_order_midwest.S1 <- auto.arima(train.midwest.S1, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_northeast.S1 <- auto.arima(train.northeast.S1, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_south.S1 <- auto.arima(train.south.S1, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_west.S1 <- auto.arima(train.west.S1, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+
+# --- Segment 2 Orders (No XREG) ---
+best_order_midwest.S2 <- auto.arima(train.midwest.S2, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_northeast.S2 <- auto.arima(train.northeast.S2, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_south.S2 <- auto.arima(train.south.S2, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_west.S2 <- auto.arima(train.west.S2, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+
+# --- Segment 3 Orders (No XREG - Must be clean) ---
+best_order_midwest.S3 <- auto.arima(train.midwest.S3, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_northeast.S3 <- auto.arima(train.northeast.S3, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_south.S3 <- auto.arima(train.south.S3, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_west.S3 <- auto.arima(train.west.S3, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+
+
+# ====================================================
+# STEP 2 & 3: Fit and Forecast
+# ====================================================
+
+# --- SEGMENT 1 (Recession) ---
+print("--- Segment 1: Fitting and Forecasting (Recession Test) ---")
+
+# Midwest S1
+arima.fit.midwest.S1 <- Arima(train.midwest.S1, order = best_order_midwest.S1, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.midwest.S1 <- forecast(arima.fit.midwest.S1, xreg = xreg.test.S1, h = h_horizon)
+
+# Northeast S1
+arima.fit.northeast.S1 <- Arima(train.northeast.S1, order = best_order_northeast.S1, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.northeast.S1 <- forecast(arima.fit.northeast.S1, xreg = xreg.test.S1, h = h_horizon)
+
+# South S1
+arima.fit.south.S1 <- Arima(train.south.S1, order = best_order_south.S1, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.south.S1 <- forecast(arima.fit.south.S1, xreg = xreg.test.S1, h = h_horizon)
+
+# West S1
+arima.fit.west.S1 <- Arima(train.west.S1, order = best_order_west.S1, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.west.S1 <- forecast(arima.fit.west.S1, xreg = xreg.test.S1, h = h_horizon)
+
+
+# --- SEGMENT 2 (Stability) ---
+print("--- Segment 2: Fitting and Forecasting (Stability Test) ---")
+
+# Midwest S2
+arima.fit.midwest.S2 <- Arima(train.midwest.S2, order = best_order_midwest.S2, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.midwest.S2 <- forecast(arima.fit.midwest.S2, xreg = xreg.test.S2, h = h_horizon)
+
+# Northeast S2
+arima.fit.northeast.S2 <- Arima(train.northeast.S2, order = best_order_northeast.S2, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.northeast.S2 <- forecast(arima.fit.northeast.S2, xreg = xreg.test.S2, h = h_horizon)
+
+# South S2
+arima.fit.south.S2 <- Arima(train.south.S2, order = best_order_south.S2, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.south.S2 <- forecast(arima.fit.south.S2, xreg = xreg.test.S2, h = h_horizon)
+
+# West S2
+arima.fit.west.S2 <- Arima(train.west.S2, order = best_order_west.S2, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.west.S2 <- forecast(arima.fit.west.S2, xreg = xreg.test.S2, h = h_horizon)
+
+
+# --- SEGMENT 3 (COVID Shock) ---
+print("--- Segment 3: Fitting and Forecasting (COVID Shock Test) ---")
+
+# *** CRITICAL FIX: The XREG term is REMOVED from the Arima() fitting call, 
+# but KEPT in the forecast() call to avoid the optim() crash. ***
+
+# Midwest S3
+arima.fit.midwest.S3 <- Arima(train.midwest.S3, order = best_order_midwest.S3, 
+                              seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.midwest.S3 <- forecast(arima.fit.midwest.S3, xreg = xreg.test.S3, h = h_horizon)
+
+# Northeast S3
+arima.fit.northeast.S3 <- Arima(train.northeast.S3, order = best_order_northeast.S3, 
+                                seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.northeast.S3 <- forecast(arima.fit.northeast.S3, xreg = xreg.test.S3, h = h_horizon)
+
+# South S3
+arima.fit.south.S3 <- Arima(train.south.S3, order = best_order_south.S3, 
+                            seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.south.S3 <- forecast(arima.fit.south.S3, xreg = xreg.test.S3, h = h_horizon)
+
+# West S3
+arima.fit.west.S3 <- Arima(train.west.S3, order = best_order_west.S3, 
+                           seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.west.S3 <- forecast(arima.fit.west.S3, xreg = xreg.test.S3, h = h_horizon)
+
+
+# --- Diagnostics (Check the largest S3 fit) ---
+print("--- ARIMA Residual Diagnostics (Using S3 Fits) ---")
+checkresiduals(arima.fit.midwest.S3)
+checkresiduals(arima.fit.northeast.S3)
+checkresiduals(arima.fit.south.S3)
+checkresiduals(arima.fit.west.S3)
+```
+
+#### This implements the ARIMA (AutoRegressive Integrated Moving Average) model, which mathematically describes the correlation within the time series data.
+
+####    It uses auto.arima to automatically find the optimal (p,d,q) parameters for each segment's training data.
+
+####    It then fits the final models using the determined orders and forecasts the next 12 months for each test segment.
+
+####    Crucially, it handles the COVID XREG variable by using it only in the forecast step, treating the COVID spike as an external, known event that should not define the underlying ARIMA structure.
+
+
+### 6.2. Neural Network NNETAR Model
+
+```{r NNETAR_3_Way_COMPLETE}
+
+## 9.2. NNETAR Model Implementation (3-Segment Evaluation)
+# Non-linear Time Series Forecasting using Neural Networks
+
+h_horizon <- 12 
+
+# The model uses the default settings for nodes (hidden layer size), 
+# but sets the maximum non-seasonal lag (max.p) to 12.
+# Scaling inputs is generally recommended for neural networks.
+
+# ====================================================
+# --- SEGMENT 1 (Recession) ---
+# ====================================================
+print("--- Segment 1: NNETAR Fits and Forecasts (Recession Test) ---")
+
+# Midwest S1
+nnetar.fit.midwest.S1 <- nnetar(train.midwest.S1, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.midwest.S1 <- forecast(nnetar.fit.midwest.S1, h = h_horizon, PI = TRUE, npaths = 100)
+
+# Northeast S1
+nnetar.fit.northeast.S1 <- nnetar(train.northeast.S1, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.northeast.S1 <- forecast(nnetar.fit.northeast.S1, h = h_horizon, PI = TRUE, npaths = 100)
+
+# South S1
+nnetar.fit.south.S1 <- nnetar(train.south.S1, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.south.S1 <- forecast(nnetar.fit.south.S1, h = h_horizon, PI = TRUE, npaths = 100)
+
+# West S1
+nnetar.fit.west.S1 <- nnetar(train.west.S1, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.west.S1 <- forecast(nnetar.fit.west.S1, h = h_horizon, PI = TRUE, npaths = 100)
+
+
+# ====================================================
+# --- SEGMENT 2 (Stability) ---
+# ====================================================
+print("--- Segment 2: NNETAR Fits and Forecasts (Stability Test) ---")
+
+# Midwest S2
+nnetar.fit.midwest.S2 <- nnetar(train.midwest.S2, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.midwest.S2 <- forecast(nnetar.fit.midwest.S2, h = h_horizon, PI = TRUE, npaths = 100)
+
+# Northeast S2
+nnetar.fit.northeast.S2 <- nnetar(train.northeast.S2, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.northeast.S2 <- forecast(nnetar.fit.northeast.S2, h = h_horizon, PI = TRUE, npaths = 100)
+
+# South S2
+nnetar.fit.south.S2 <- nnetar(train.south.S2, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.south.S2 <- forecast(nnetar.fit.south.S2, h = h_horizon, PI = TRUE, npaths = 100)
+
+# West S2
+nnetar.fit.west.S2 <- nnetar(train.west.S2, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.west.S2 <- forecast(nnetar.fit.west.S2, h = h_horizon, PI = TRUE, npaths = 100)
+
+
+# ====================================================
+# --- SEGMENT 3 (COVID Shock) ---
+# ====================================================
+print("--- Segment 3: NNETAR Fits and Forecasts (COVID Test) ---")
+
+# Midwest S3
+nnetar.fit.midwest.S3 <- nnetar(train.midwest.S3, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.midwest.S3 <- forecast(nnetar.fit.midwest.S3, h = h_horizon, PI = TRUE, npaths = 100)
+
+# Northeast S3
+nnetar.fit.northeast.S3 <- nnetar(train.northeast.S3, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.northeast.S3 <- forecast(nnetar.fit.northeast.S3, h = h_horizon, PI = TRUE, npaths = 100)
+
+# South S3
+nnetar.fit.south.S3 <- nnetar(train.south.S3, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.south.S3 <- forecast(nnetar.fit.south.S3, h = h_horizon, PI = TRUE, npaths = 100)
+
+# West S3
+nnetar.fit.west.S3 <- nnetar(train.west.S3, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.west.S3 <- forecast(nnetar.fit.west.S3, h = h_horizon, PI = TRUE, npaths = 100)
+
+
+# ====================================================
+# --- Accuracy (Check all S3 Test Sets) ---
+# ====================================================
+print("--- NNETAR Model Accuracy (Segment 3 Test Set) ---")
+
+# Midwest S3 Accuracy
+print("Midwest - NNETAR Model Accuracy (S3 Test Set):")
+accuracy(nnetar.forecast.midwest.S3, test.midwest.S3)
+
+# Northeast S3 Accuracy
+print("Northeast - NNETAR Model Accuracy (S3 Test Set):")
+accuracy(nnetar.forecast.northeast.S3, test.northeast.S3)
+
+# South S3 Accuracy
+print("South - NNETAR Model Accuracy (S3 Test Set):")
+accuracy(nnetar.forecast.south.S3, test.south.S3)
+
+# West S3 Accuracy
+print("West - NNETAR Model Accuracy (S3 Test Set):")
+accuracy(nnetar.forecast.west.S3, test.west.S3)
+```
+
+#### This implements the NNETAR (Neural Network AutoRegressive) model, a type of Artificial Neural Network designed for time series. It's often effective at capturing non-linear patterns that traditional linear models like ARIMA or ETS might miss. It sets the maximum autoregressive lag to 12 (max.p = 12) to allow the model to look back up to one year to find the best predictors.
+
+## Fitted Models 
+
+### Naive 
+
+```{r naive_summary_s3_midwest}
+# Displays the error statistics for the in-sample fit of the Naive model.
+summary(naive.forecast.midwest.S3)
+```
+
+### ARIMA
+
+```{r arima_summary_s3_midwest}
+# Displays the chosen orders, estimated coefficients (if any), 
+# and key fit statistics (AICc, BIC).
+summary(arima.fit.midwest.S3)
+```
+
+### ETS 
+
+```{r ets_summary_s3_midwest}
+# Displays the chosen model (e.g., ETS(A,Ad,N)), 
+# the smoothing parameters, and fit statistics.
+summary(ets.fit.midwest.S3)
+```
+
+### Naive Model
+
+```{r nnetar_summary_s3_midwest}
+# Displays the network structure (input, hidden layer nodes) 
+# and the total number of weights (parameters) fitted.
+summary(nnetar.fit.midwest.S3)
+```
+
+## 7. Accuracy and Model Selection
+
+### 7.1. Model-by-Model Accuracy Comparison
+
+``` {r ACC Comp}
+## 10. Accuracy Comparison: ETS vs. ARIMA (3-Segment Evaluation)
+
+# ====================================================
+# SEGMENT 1: GREAT RECESSION (2008) TEST
+# ====================================================
+print("=========================================================")
+print("### Segment 1 Accuracy (Recession Test Set: 2008-01 to 2008-12) ###")
+print("=========================================================")
+
+print("Midwest - Accuracy Comparison on Test Set S1:")
+accuracy(ets.forecast.midwest.S1, test.midwest.S1)
+accuracy(arima.forecast.midwest.S1, test.midwest.S1)
+
+print("Northeast - Accuracy Comparison on Test Set S1:")
+accuracy(ets.forecast.northeast.S1, test.northeast.S1)
+accuracy(arima.forecast.northeast.S1, test.northeast.S1)
+
+print("South - Accuracy Comparison on Test Set S1:")
+accuracy(ets.forecast.south.S1, test.south.S1)
+accuracy(arima.forecast.south.S1, test.south.S1)
+
+print("West - Accuracy Comparison on Test Set S1:")
+accuracy(ets.forecast.west.S1, test.west.S1)
+accuracy(arima.forecast.west.S1, test.west.S1)
+
+# ---
+# You can use a horizontal line to separate the segments in the output
+print("---")
+
+
+# ====================================================
+# SEGMENT 2: INTER-CRISIS STABILITY (2019) TEST
+# ====================================================
+print("=========================================================")
+print("### Segment 2 Accuracy (Stability Test Set: 2019-01 to 2019-12) ###")
+print("=========================================================")
+
+print("Midwest - Accuracy Comparison on Test Set S2:")
+accuracy(ets.forecast.midwest.S2, test.midwest.S2)
+accuracy(arima.forecast.midwest.S2, test.midwest.S2)
+
+print("Northeast - Accuracy Comparison on Test Set S2:")
+accuracy(ets.forecast.northeast.S2, test.northeast.S2)
+accuracy(arima.forecast.northeast.S2, test.northeast.S2)
+
+print("South - Accuracy Comparison on Test Set S2:")
+accuracy(ets.forecast.south.S2, test.south.S2)
+accuracy(arima.forecast.south.S2, test.south.S2)
+
+print("West - Accuracy Comparison on Test Set S2:")
+accuracy(ets.forecast.west.S2, test.west.S2)
+accuracy(arima.forecast.west.S2, test.west.S2)
+
+# ---
+print("---")
+
+
+# ====================================================
+# SEGMENT 3: COVID SHOCK (2020) TEST
+# ====================================================
+print("=========================================================")
+print("### Segment 3 Accuracy (COVID Shock Test Set: 2020-03 to 2021-02) ###")
+print("=========================================================")
+
+print("Midwest - Accuracy Comparison on Test Set S3:")
+accuracy(ets.forecast.midwest.S3, test.midwest.S3)
+accuracy(arima.forecast.midwest.S3, test.midwest.S3)
+
+print("Northeast - Accuracy Comparison on Test Set S3:")
+accuracy(ets.forecast.northeast.S3, test.northeast.S3)
+accuracy(arima.forecast.northeast.S3, test.northeast.S3)
+
+print("South - Accuracy Comparison on Test Set S3:")
+accuracy(ets.forecast.south.S3, test.south.S3)
+accuracy(arima.forecast.south.S3, test.south.S3)
+
+print("West - Accuracy Comparison on Test Set S3:")
+accuracy(ets.forecast.west.S3, test.west.S3)
+accuracy(arima.forecast.west.S3, test.west.S3)
+```
+
+#### This chunk manually prints the accuracy tables for the ETS and ARIMA models for each region and each segment. This allows for a direct, visual comparison of key metrics like RMSE, MASE, and MAPE before compiling the final summary table.
+
+### 7.2. Final Accuracy Summary Table
+
+``` {r Summary}
+## 10. Accuracy Summary Compilation (Final Execution Code - Prophet Removed)
+
+# Load necessary libraries 
+library(forecast)
+library(dplyr)
+library(tibble)
+library(zoo) 
+
+# --- 1. Function to safely extract metrics using tryCatch (for Naive, ETS, ARIMA, NNETAR) ---
+extract_metrics <- function(forecast_object, test_set, model_name, fit_object = NULL) {
+  
+  # Define a guaranteed NA result dataframe for errors
+  fail_df <- data.frame(Model = model_name, MAPE = NA, MASE = NA, RMSE = NA, AIC = NA)
+  
+  results <- tryCatch({
+    # Attempt to calculate accuracy
+    acc <- accuracy(forecast_object, test_set)
+    
+    # Determine AIC: default to NA, update if ARIMA/ETS fit object is provided
+    aic_val <- NA
+    if (!is.null(fit_object) && inherits(fit_object, "ARIMA")) {
+      aic_val <- fit_object$aic
+    } else if (!is.null(fit_object) && inherits(fit_object, "ets")) {
+      aic_val <- fit_object$aic
+    }
+    
+    # Check if test set metrics (row 2) are present
+    if (nrow(acc) < 2) {
+        warning(paste("Accuracy output for", model_name, "is missing test set row!"))
+        return(fail_df)
+    }
+    
+    # Return the successful data frame (using row 2 for test set metrics)
+    data.frame(
+      Model = model_name,
+      MAPE = acc[2, "MAPE"],
+      MASE = acc[2, "MASE"],
+      RMSE = acc[2, "RMSE"],
+      AIC = aic_val
+    )
+  }, error = function(e) {
+    warning(paste("FATAL ERROR encountered while processing", model_name, "forecast:", e$message))
+    return(fail_df)
+  })
+  
+  return(results)
+}
+
+# NOTE: The extract_prophet_metrics function has been removed.
+
+# ====================================================
+# A. SEGMENT 1: GREAT RECESSION (2008) SUMMARY
+# ====================================================
+
+# --- Midwest S1 ---
+midwest_S1_acc <- bind_rows(
+  extract_metrics(naive.forecast.midwest.S1, test.midwest.S1, "Naive"),
+  extract_metrics(ets.forecast.midwest.S1, test.midwest.S1, "ETS", ets.fit.midwest.S1),
+  extract_metrics(arima.forecast.midwest.S1, test.midwest.S1, "ARIMA", arima.fit.midwest.S1),
+  extract_metrics(nnetar.forecast.midwest.S1, test.midwest.S1, "NNETAR")
+) %>% add_column(Region = "Midwest", .before = 1)
+
+
+# --- Northeast S1 ---
+northeast_S1_acc <- bind_rows(
+  extract_metrics(naive.forecast.northeast.S1, test.northeast.S1, "Naive"),
+  extract_metrics(ets.forecast.northeast.S1, test.northeast.S1, "ETS", ets.fit.northeast.S1),
+  extract_metrics(arima.forecast.northeast.S1, test.northeast.S1, "ARIMA", arima.fit.northeast.S1),
+  extract_metrics(nnetar.forecast.northeast.S1, test.northeast.S1, "NNETAR")
+) %>% add_column(Region = "Northeast", .before = 1)
+
+# --- South S1 ---
+south_S1_acc <- bind_rows(
+  extract_metrics(naive.forecast.south.S1, test.south.S1, "Naive"),
+  extract_metrics(ets.forecast.south.S1, test.south.S1, "ETS", ets.fit.south.S1),
+  extract_metrics(arima.forecast.south.S1, test.south.S1, "ARIMA", arima.fit.south.S1),
+  extract_metrics(nnetar.forecast.south.S1, test.south.S1, "NNETAR")
+) %>% add_column(Region = "South", .before = 1)
+
+# --- West S1 ---
+west_S1_acc <- bind_rows(
+  extract_metrics(naive.forecast.west.S1, test.west.S1, "Naive"),
+  extract_metrics(ets.forecast.west.S1, test.west.S1, "ETS", ets.fit.west.S1),
+  extract_metrics(arima.forecast.west.S1, test.west.S1, "ARIMA", arima.fit.west.S1),
+  extract_metrics(nnetar.forecast.west.S1, test.west.S1, "NNETAR")
+) %>% add_column(Region = "West", .before = 1)
+
+# Combine all S1 data
+accuracy_summary_S1 <- bind_rows(midwest_S1_acc, northeast_S1_acc, south_S1_acc, west_S1_acc)
+print("--- SEGMENT 1: RECESSION (2008) ACCURACY SUMMARY ---")
+print(accuracy_summary_S1)
+
+# ====================================================
+# B. SEGMENT 2: INTER-CRISIS STABILITY (2019) SUMMARY
+# ====================================================
+
+# --- Midwest S2 ---
+midwest_S2_acc <- bind_rows(
+  extract_metrics(naive.forecast.midwest.S2, test.midwest.S2, "Naive"),
+  extract_metrics(ets.forecast.midwest.S2, test.midwest.S2, "ETS", ets.fit.midwest.S2),
+  extract_metrics(arima.forecast.midwest.S2, test.midwest.S2, "ARIMA", arima.fit.midwest.S2),
+  extract_metrics(nnetar.forecast.midwest.S2, test.midwest.S2, "NNETAR")
+) %>% add_column(Region = "Midwest", .before = 1)
+
+
+# --- Northeast S2 ---
+northeast_S2_acc <- bind_rows(
+  extract_metrics(naive.forecast.northeast.S2, test.northeast.S2, "Naive"),
+  extract_metrics(ets.forecast.northeast.S2, test.northeast.S2, "ETS", ets.fit.northeast.S2),
+  extract_metrics(arima.forecast.northeast.S2, test.northeast.S2, "ARIMA", arima.fit.northeast.S2),
+  extract_metrics(nnetar.forecast.northeast.S2, test.northeast.S2, "NNETAR")
+) %>% add_column(Region = "Northeast", .before = 1)
+
+# --- South S2 ---
+south_S2_acc <- bind_rows(
+  extract_metrics(naive.forecast.south.S2, test.south.S2, "Naive"),
+  extract_metrics(ets.forecast.south.S2, test.south.S2, "ETS", ets.fit.south.S2),
+  extract_metrics(arima.forecast.south.S2, test.south.S2, "ARIMA", arima.fit.south.S2),
+  extract_metrics(nnetar.forecast.south.S2, test.south.S2, "NNETAR")
+) %>% add_column(Region = "South", .before = 1)
+
+# --- West S2 ---
+west_S2_acc <- bind_rows(
+  extract_metrics(naive.forecast.west.S2, test.west.S2, "Naive"),
+  extract_metrics(ets.forecast.west.S2, test.west.S2, "ETS", ets.fit.west.S2),
+  extract_metrics(arima.forecast.west.S2, test.west.S2, "ARIMA", arima.fit.west.S2),
+  extract_metrics(nnetar.forecast.west.S2, test.west.S2, "NNETAR")
+) %>% add_column(Region = "West", .before = 1)
+
+# Combine all S2 data
+accuracy_summary_S2 <- bind_rows(midwest_S2_acc, northeast_S2_acc, south_S2_acc, west_S2_acc)
+print("--- SEGMENT 2: STABILITY (2019) ACCURACY SUMMARY ---")
+print(accuracy_summary_S2)
+
+print("\n\n")
+
+# ====================================================
+# C. SEGMENT 3: COVID SHOCK (2020) SUMMARY
+# ====================================================
+
+# --- Midwest S3 ---
+midwest_S3_acc <- bind_rows(
+  extract_metrics(naive.forecast.midwest.S3, test.midwest.S3, "Naive"),
+  extract_metrics(ets.forecast.midwest.S3, test.midwest.S3, "ETS", ets.fit.midwest.S3),
+  extract_metrics(arima.forecast.midwest.S3, test.midwest.S3, "ARIMA", arima.fit.midwest.S3),
+  extract_metrics(nnetar.forecast.midwest.S3, test.midwest.S3, "NNETAR")
+) %>% add_column(Region = "Midwest", .before = 1)
+
+# --- Northeast S3 ---
+northeast_S3_acc <- bind_rows(
+  extract_metrics(naive.forecast.northeast.S3, test.northeast.S3, "Naive"),
+  extract_metrics(ets.forecast.northeast.S3, test.northeast.S3, "ETS", ets.fit.northeast.S3),
+  extract_metrics(arima.forecast.northeast.S3, test.northeast.S3, "ARIMA", arima.fit.northeast.S3),
+  extract_metrics(nnetar.forecast.northeast.S3, test.northeast.S3, "NNETAR")
+) %>% add_column(Region = "Northeast", .before = 1)
+
+# --- South S3 ---
+south_S3_acc <- bind_rows(
+  extract_metrics(naive.forecast.south.S3, test.south.S3, "Naive"),
+  extract_metrics(ets.forecast.south.S3, test.south.S3, "ETS", ets.fit.south.S3),
+  extract_metrics(arima.forecast.south.S3, test.south.S3, "ARIMA", arima.fit.south.S3),
+  extract_metrics(nnetar.forecast.south.S3, test.south.S3, "NNETAR")
+) %>% add_column(Region = "South", .before = 1)
+
+# --- West S3 ---
+west_S3_acc <- bind_rows(
+  extract_metrics(naive.forecast.west.S3, test.west.S3, "Naive"),
+  extract_metrics(ets.forecast.west.S3, test.west.S3, "ETS", ets.fit.west.S3),
+  extract_metrics(arima.forecast.west.S3, test.west.S3, "ARIMA", arima.fit.west.S3),
+  extract_metrics(nnetar.forecast.west.S3, test.west.S3, "NNETAR")
+) %>% add_column(Region = "West", .before = 1)
+
+# Combine all S3 data
+accuracy_summary_S3 <- bind_rows(midwest_S3_acc, northeast_S3_acc, south_S3_acc, west_S3_acc)
+print("--- SEGMENT 3: COVID SHOCK (2020) ACCURACY SUMMARY ---")
+print(accuracy_summary_S3)
+```
+
+#### This chunk contains a custom function extract_metrics designed to reliably pull the key performance indicators (MAPE, MASE, RMSE, AIC) from all four models and consolidate them. It generates three large summary tables (one for each segment) showing how every model performed on the hold-out test set for every region.
+
+### 7.3. Model Selection
+```{r Selected Models}
+## 11. Model Selection (Minimizing MASE and MAPE)
+
+library(dplyr)
+library(tibble)
+
+# ====================================================
+# A. SEGMENT 1: GREAT RECESSION (2008) WINNERS
+# ====================================================
+
+best_models_S1 <- accuracy_summary_S1 %>%
+  group_by(Region) %>%
+  # Select the model with the minimum MASE (Primary Metric)
+  # Arrange by MASE first, then by MAPE for tie-breaking
+  arrange(MASE, MAPE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(Region, Model, MASE, MAPE)
+
+print("--- SEGMENT 1 WINNERS (RECESSION) ---")
+print(best_models_S1)
+
+# ====================================================
+# B. SEGMENT 2: INTER-CRISIS STABILITY (2019) WINNERS
+# ====================================================
+
+best_models_S2 <- accuracy_summary_S2 %>%
+  group_by(Region) %>%
+  # Select the model with the minimum MASE (Primary Metric)
+  arrange(MASE, MAPE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(Region, Model, MASE, MAPE)
+
+print("--- SEGMENT 2 WINNERS (STABILITY) ---")
+print(best_models_S2)
+
+# ====================================================
+# C. SEGMENT 3: COVID SHOCK (2020) WINNERS
+# ====================================================
+
+best_models_S3 <- accuracy_summary_S3 %>%
+  group_by(Region) %>%
+  # Select the model with the minimum MASE (Primary Metric)
+  arrange(MASE, MAPE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(Region, Model, MASE, MAPE)
+
+print("--- SEGMENT 3 WINNERS (COVID SHOCK) ---")
+print(best_models_S3)
+```
+
+#### This is the final selection step. It uses the comprehensive summary tables from the previous chunk and applies the model selection criteria (minimizing MASE as the primary metric, followed by MAPE as a tie-breaker). It prints a concise table for each segment, identifying the single best-performing model for each of the four US Census regions under that specific economic scenario.
+
+## 8. Forecasting Plots
+
+```{r combined_4x4_s3_plot_PI, fig.height=20, fig.width=18}
+library(forecast)
+library(patchwork)
+library(ggplot2) # Ensure ggplot2 is loaded for theme modifications
+
+# --- 1. Helper Function to Create Individual Plots ---
+# Sets PI = TRUE to include Prediction Intervals.
+create_plot_s3_pi <- function(train_data, test_data, forecast_obj, model_name, region_name) {
+  autoplot(train_data) +
+    # Use autolayer for the actual test data
+    autolayer(test_data, series = "Actual Test") +
+    # Use autolayer for the forecast with Prediction Intervals (PI=TRUE)
+    autolayer(forecast_obj, series = paste(model_name, "Forecast"), PI = TRUE) +
+    ggtitle(paste(region_name, ":", model_name)) +
+    xlab("") + ylab("") +
+    # Reduce title/axis text size for the dense grid
+    theme(legend.position = "none", 
+          plot.title = element_text(size = 11, face = "bold"),
+          axis.text = element_text(size = 8),
+          axis.title = element_text(size = 9))
+}
+
+# --- 2. Create All 16 Plots ---
+
+# --- Row 1: Naive Model ---
+P_M_Naive <- create_plot_s3_pi(train.midwest.S3, test.midwest.S3, naive.forecast.midwest.S3, "Naive", "Midwest")
+P_N_Naive <- create_plot_s3_pi(train.northeast.S3, test.northeast.S3, naive.forecast.northeast.S3, "Naive", "Northeast")
+P_S_Naive <- create_plot_s3_pi(train.south.S3, test.south.S3, naive.forecast.south.S3, "Naive", "South")
+P_W_Naive <- create_plot_s3_pi(train.west.S3, test.west.S3, naive.forecast.west.S3, "Naive", "West")
+
+# --- Row 2: ETS Model ---
+P_M_ETS <- create_plot_s3_pi(train.midwest.S3, test.midwest.S3, ets.forecast.midwest.S3, "ETS", "Midwest")
+P_N_ETS <- create_plot_s3_pi(train.northeast.S3, test.northeast.S3, ets.forecast.northeast.S3, "ETS", "Northeast")
+P_S_ETS <- create_plot_s3_pi(train.south.S3, test.south.S3, ets.forecast.south.S3, "ETS", "South")
+P_W_ETS <- create_plot_s3_pi(train.west.S3, test.west.S3, ets.forecast.west.S3, "ETS", "West")
+
+# --- Row 3: ARIMA Model ---
+P_M_ARIMA <- create_plot_s3_pi(train.midwest.S3, test.midwest.S3, arima.forecast.midwest.S3, "ARIMA", "Midwest")
+P_N_ARIMA <- create_plot_s3_pi(train.northeast.S3, test.northeast.S3, arima.forecast.northeast.S3, "ARIMA", "Northeast")
+P_S_ARIMA <- create_plot_s3_pi(train.south.S3, test.south.S3, arima.forecast.south.S3, "ARIMA", "South")
+P_W_ARIMA <- create_plot_s3_pi(train.west.S3, test.west.S3, arima.forecast.west.S3, "ARIMA", "West")
+
+# --- Row 4: NNETAR Model ---
+P_M_NNETAR <- create_plot_s3_pi(train.midwest.S3, test.midwest.S3, nnetar.forecast.midwest.S3, "NNETAR", "Midwest")
+P_N_NNETAR <- create_plot_s3_pi(train.northeast.S3, test.northeast.S3, nnetar.forecast.northeast.S3, "NNETAR", "Northeast")
+P_S_NNETAR <- create_plot_s3_pi(train.south.S3, test.south.S3, nnetar.forecast.south.S3, "NNETAR", "South")
+P_W_NNETAR <- create_plot_s3_pi(train.west.S3, test.west.S3, nnetar.forecast.west.S3, "NNETAR", "West")
+
+# --- 3. Arrange Plots using Patchwork ---
+# Arrange the 16 plots in a 4x4 grid (Models = Rows, Regions = Columns).
+(P_M_Naive + P_N_Naive + P_S_Naive + P_W_Naive) /
+(P_M_ETS + P_N_ETS + P_S_ETS + P_W_ETS) /
+(P_M_ARIMA + P_N_ARIMA + P_S_ARIMA + P_W_ARIMA) /
+(P_M_NNETAR + P_N_NNETAR + P_S_NNETAR + P_W_NNETAR) +
+  plot_layout(guides = 'collect') +
+  plot_annotation(title = '4x4 Comparison: Model Performance Across Regions (Segment 3: COVID Shock) with Prediction Intervals', 
+                  subtitle = 'Rows = Model (Naive, ETS, ARIMA, NNETAR), Columns = Region. Shaded areas represent 80% and 95% Prediction Intervals.',
+                  theme = theme(plot.title = element_text(size = 18, face = "bold"), 
+                                plot.subtitle = element_text(size = 12)))
+```
+
+## 9. Model Assumptions Check (Revisited)
+
+### 9.1. ARIMA Model Diagnosis
+
+```{r check_arima_assumptions, fig.height=8, fig.width=10}
+# Check assumptions for the fitted ARIMA model (e.g., Midwest, Segment 3)
+# This function generates 4 plots and performs the Ljung-Box test.
+checkresiduals(arima.fit.midwest.S3)
+```
+
+### 9.2. ETS Model Diagnostics
+
+```{r check_ets_assumptions, fig.height=8, fig.width=10}
+# Check assumptions for the fitted ETS model (e.g., Midwest, Segment 3)
+checkresiduals(ets.fit.midwest.S3)
+```
+
+### 9.3. Naive Model Diagnostics (White Noise Check)
+
+```{r check_naive_assumptions}
+# Check residuals for the Naive model fit
+checkresiduals(naive.forecast.midwest.S3)
+```
+
+## 10. Visualizing Fitted Models
+
+```{r combined_fitted_plot, fig.height=6, fig.width=10}
+# 1. Extract the actual data and fitted values for all models
+actual_data <- train.midwest.S3
+fitted_arima <- arima.fit.midwest.S3$fitted
+fitted_ets <- ets.fit.midwest.S3$fitted
+fitted_nnetar <- nnetar.fit.midwest.S3$fitted
+
+# 2. Plot the actual data (black line)
+plot(actual_data, 
+     main="Fitted Model Lines vs. Actual Data (Midwest S3)",
+     ylab="Unemployment Rate",
+     xlab="Time",
+     lwd=2, # thicker line for actual data
+     col="black")
+
+# 3. Add the fitted lines
+lines(fitted_arima, col="red", lty=2, lwd=1.5) # Dashed line for ARIMA
+lines(fitted_ets, col="blue", lty=1, lwd=1.5)   # Solid line for ETS
+lines(fitted_nnetar, col="green4", lty=3, lwd=1.5) # Dotted line for NNETAR
+
+# 4. Add a legend
+legend("topright", 
+       legend=c("Actual Data", "ARIMA(0,1,0) Fitted", "ETS(A,Ad,N) Fitted", "NNETAR(1,1) Fitted"),
+       col=c("black", "red", "blue", "green4"), 
+       lty=c(1, 2, 1, 3), lwd=c(2, 1.5, 1.5, 1.5), 
+       bty="n")
+
+```

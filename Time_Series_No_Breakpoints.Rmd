@@ -1,0 +1,353 @@
+---
+title: "MA611 Final Project"
+author: "Uriel Ulloa"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: hide # Allows user to hide/show code chunks in the report
+    theme: cosmo # A clean, professional theme
+    highlight: tango
+---
+
+``` {r code}
+
+## R CODE: Unemployment Rate Analysis (Updated Train/Test Split: Test starts 2021)
+
+# =========================================================================
+## 1. Setup and Data Loading (Retained)
+# =========================================================================
+library(readxl)
+library(tidyverse)
+library(tsibble) 
+library(lubridate)
+library(feasts) 
+library(fable)
+library(dplyr)
+library(forecast)
+library(fpp2)
+library(ggplot2)
+library(strucchange) 
+library(prophet)
+library(zoo) 
+library(tibble) # For accuracy table creation
+library(patchwork) # For plotting
+
+# 1. Load the data files (UPDATE THESE PATHS)
+midwest <- read_excel("/Users/urielulloa/Desktop/Time_Series_Project/Midwest.xlsx", sheet = "Monthly") %>%
+  rename(Midwest = CMWRUR) 
+northeast <- read_excel("/Users/urielulloa/Desktop/Time_Series_Project/Northeast.xlsx", sheet = "Monthly") %>%
+  rename(Northeast = CNERUR)
+south <- read_excel("/Users/urielulloa/Desktop/Time_Series_Project/South.xlsx", sheet = "Monthly") %>%
+  rename(South = CSOUUR)
+west <- read_excel("/Users/urielulloa/Desktop/Time_Series_Project/West.xlsx", sheet = "Monthly") %>%
+  rename(West = CWSTUR)
+
+# 2. Combine the datasets and convert to a tsibble (UNCHANGED)
+unemployment_data <- midwest %>%
+  left_join(northeast, by = "observation_date") %>%
+  left_join(south, by = "observation_date") %>%
+  left_join(west, by = "observation_date") %>%
+  mutate(observation_date = ymd(observation_date)) %>%
+  as_tsibble(index = observation_date)
+
+# =========================================================================
+## 2. Data Transformation and Preparation (UPDATED SPLIT - ERROR FIX)
+# =========================================================================
+
+df_unemp <- unemployment_data
+start_date <- c(1976, 1)
+
+# --- NEW SPLIT DEFINITION ---
+new_train_end <- c(2020, 12)
+new_test_start <- c(2021, 1)
+new_test_end <- c(2025, 7) # Retaining the latest date from your previous test set
+
+
+# 🚨 ERROR FIX: Create FULL Time Series (ts) Objects FIRST 🚨
+midwest.ts <- ts(df_unemp$Midwest, start = start_date, frequency = 12)
+northeast.ts <- ts(df_unemp$Northeast, start = start_date, frequency = 12)
+south.ts <- ts(df_unemp$South, start = start_date, frequency = 12)
+west.ts <- ts(df_unemp$West, start = start_date, frequency = 12)
+
+
+# The forecast horizon h_horizon is now correctly calculated using the now-defined midwest.ts
+h_horizon <- length(window(midwest.ts, start = new_test_start, end = new_test_end)) 
+
+
+# --- Define New Training and Test Sets ---
+train.midwest.FULL <- window(midwest.ts, end = new_train_end)
+train.northeast.FULL <- window(northeast.ts, end = new_train_end)
+train.south.FULL <- window(south.ts, end = new_train_end)
+train.west.FULL <- window(west.ts, end = new_train_end)
+
+test.midwest.FULL <- window(midwest.ts, start = new_test_start, end = new_test_end)
+test.northeast.FULL <- window(northeast.ts, start = new_test_start, end = new_test_end)
+test.south.FULL <- window(south.ts, start = new_test_start, end = new_test_end)
+test.west.FULL <- window(west.ts, start = new_test_start, end = new_test_end)
+
+
+# =========================================================================
+## 3. COVID-19 XREG Impulse Creation (UPDATED SPLIT)
+# =========================================================================
+
+# Define the full time index
+full_time_index <- time(midwest.ts) 
+
+# Create the three impulse regressors for the peak months (April, May, June 2020)
+impulse_apr <- ifelse(full_time_index == (2020 + 3/12), 1, 0) 
+impulse_may <- ifelse(full_time_index == (2020 + 4/12), 1, 0)
+impulse_jun <- ifelse(full_time_index == (2020 + 5/12), 1, 0)
+
+# Combine them into a matrix for the full series
+covid_impulse_train <- cbind(
+  APR20_Impulse = ts(impulse_apr, start = start_date, frequency = 12),
+  MAY20_Impulse = ts(impulse_may, start = start_date, frequency = 12),
+  JUN20_Impulse = ts(impulse_jun, start = start_date, frequency = 12)
+)
+
+# Split the impulse matrix for the NEW TRAINING and TESTING periods:
+# The impulse is ONLY in the training data, but xreg.test.FULL must have the 
+# correct number of rows (all zeros) for the new forecast horizon.
+xreg.train.FULL <- window(covid_impulse_train, end = new_train_end)
+xreg.test.FULL <- window(covid_impulse_train, start = new_test_start, end = new_test_end)
+
+
+# =========================================================================
+## 4. Model Fitting: Naive, ETS, ARIMA, NNETAR (Uses new train/test sets)
+# =========================================================================
+
+print("--- FITTING MODELS TO FULL TRAINING DATA (Up to 2020-12) ---")
+
+# --- Naive Model ---
+naive.forecast.midwest.FULL <- naive(train.midwest.FULL, h = h_horizon)
+naive.forecast.northeast.FULL <- naive(train.northeast.FULL, h = h_horizon)
+naive.forecast.south.FULL <- naive(train.south.FULL, h = h_horizon)
+naive.forecast.west.FULL <- naive(train.west.FULL, h = h_horizon)
+
+# --- ETS Model (AAN) ---
+ets.fit.midwest.FULL <- ets(train.midwest.FULL, model = "AAN") 
+ets.fit.northeast.FULL <- ets(train.northeast.FULL, model = "AAN")
+ets.fit.south.FULL <- ets(train.south.FULL, model = "AAN")
+ets.fit.west.FULL <- ets(train.west.FULL, model = "AAN")
+ets.forecast.midwest.FULL <- forecast(ets.fit.midwest.FULL, h = h_horizon)
+ets.forecast.northeast.FULL <- forecast(ets.fit.northeast.FULL, h = h_horizon)
+ets.forecast.south.FULL <- forecast(ets.fit.south.FULL, h = h_horizon)
+ets.forecast.west.FULL <- forecast(ets.fit.west.FULL, h = h_horizon)
+
+# --- ARIMA Model ---
+# Find optimal non-seasonal orders (p, d, q)
+best_order_midwest.FULL <- auto.arima(train.midwest.FULL, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_northeast.FULL <- auto.arima(train.northeast.FULL, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_south.FULL <- auto.arima(train.south.FULL, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+best_order_west.FULL <- auto.arima(train.west.FULL, seasonal = FALSE, max.d = 1)$arma[c(1, 6, 2)]
+
+# Fit and Forecast using XREG ONLY in the forecast step
+arima.fit.midwest.FULL <- Arima(train.midwest.FULL, order = best_order_midwest.FULL, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.midwest.FULL <- forecast(arima.fit.midwest.FULL, xreg = xreg.test.FULL, h = h_horizon)
+
+arima.fit.northeast.FULL <- Arima(train.northeast.FULL, order = best_order_northeast.FULL, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.northeast.FULL <- forecast(arima.fit.northeast.FULL, xreg = xreg.test.FULL, h = h_horizon)
+
+arima.fit.south.FULL <- Arima(train.south.FULL, order = best_order_south.FULL, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.south.FULL <- forecast(arima.fit.south.FULL, xreg = xreg.test.FULL, h = h_horizon)
+
+arima.fit.west.FULL <- Arima(train.west.FULL, order = best_order_west.FULL, seasonal = list(order = c(0, 0, 0), period = 12), method = "CSS", include.mean = FALSE)
+arima.forecast.west.FULL <- forecast(arima.fit.west.FULL, xreg = xreg.test.FULL, h = h_horizon)
+
+
+# --- NNETAR Model ---
+nnetar.fit.midwest.FULL <- nnetar(train.midwest.FULL, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.midwest.FULL <- forecast(nnetar.fit.midwest.FULL, h = h_horizon, PI = TRUE, npaths = 100)
+
+nnetar.fit.northeast.FULL <- nnetar(train.northeast.FULL, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.northeast.FULL <- forecast(nnetar.fit.northeast.FULL, h = h_horizon, PI = TRUE, npaths = 100)
+
+nnetar.fit.south.FULL <- nnetar(train.south.FULL, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.south.FULL <- forecast(nnetar.fit.south.FULL, h = h_horizon, PI = TRUE, npaths = 100)
+
+nnetar.fit.west.FULL <- nnetar(train.west.FULL, max.p = 12, max.P = 0, scale.inputs = TRUE)
+nnetar.forecast.west.FULL <- forecast(nnetar.fit.west.FULL, h = h_horizon, PI = TRUE, npaths = 100)
+
+
+# =========================================================================
+## 5. Accuracy and Model Selection (Consolidated Summary)
+# =========================================================================
+
+# --- Function to safely extract metrics (retained) ---
+extract_metrics <- function(forecast_object, test_set, model_name, fit_object = NULL) {
+  fail_df <- data.frame(Model = model_name, MAPE = NA, MASE = NA, RMSE = NA, AIC = NA)
+  results <- tryCatch({
+    acc <- accuracy(forecast_object, test_set)
+    aic_val <- NA
+    if (!is.null(fit_object) && inherits(fit_object, "ARIMA")) { aic_val <- fit_object$aic } 
+    else if (!is.null(fit_object) && inherits(fit_object, "ets")) { aic_val <- fit_object$aic }
+    if (nrow(acc) < 2) { 
+      warning(paste("Accuracy output for", model_name, "is missing test set row!"))
+      return(fail_df)
+    }
+    data.frame(
+      Model = model_name,
+      MAPE = acc[2, "MAPE"],
+      MASE = acc[2, "MASE"],
+      RMSE = acc[2, "RMSE"],
+      AIC = aic_val
+    )
+  }, error = function(e) {
+    warning(paste("FATAL ERROR encountered while processing", model_name, "forecast:", e$message))
+    return(fail_df)
+  })
+  return(results)
+}
+
+# --- Compile Accuracy Summary for FULL Data Test (2021-01 onwards) ---
+midwest_FULL_acc <- bind_rows(
+  extract_metrics(naive.forecast.midwest.FULL, test.midwest.FULL, "Naive"),
+  extract_metrics(ets.forecast.midwest.FULL, test.midwest.FULL, "ETS", ets.fit.midwest.FULL),
+  extract_metrics(arima.forecast.midwest.FULL, test.midwest.FULL, "ARIMA", arima.fit.midwest.FULL),
+  extract_metrics(nnetar.forecast.midwest.FULL, test.midwest.FULL, "NNETAR")
+) %>% add_column(Region = "Midwest", .before = 1)
+
+northeast_FULL_acc <- bind_rows(
+  extract_metrics(naive.forecast.northeast.FULL, test.northeast.FULL, "Naive"),
+  extract_metrics(ets.forecast.northeast.FULL, test.northeast.FULL, "ETS", ets.fit.northeast.FULL),
+  extract_metrics(arima.forecast.northeast.FULL, test.northeast.FULL, "ARIMA", arima.fit.northeast.FULL),
+  extract_metrics(nnetar.forecast.northeast.FULL, test.northeast.FULL, "NNETAR")
+) %>% add_column(Region = "Northeast", .before = 1)
+
+south_FULL_acc <- bind_rows(
+  extract_metrics(naive.forecast.south.FULL, test.south.FULL, "Naive"),
+  extract_metrics(ets.forecast.south.FULL, test.south.FULL, "ETS", ets.fit.south.FULL),
+  extract_metrics(arima.forecast.south.FULL, test.south.FULL, "ARIMA", arima.fit.south.FULL),
+  extract_metrics(nnetar.forecast.south.FULL, test.south.FULL, "NNETAR")
+) %>% add_column(Region = "South", .before = 1)
+
+west_FULL_acc <- bind_rows(
+  extract_metrics(naive.forecast.west.FULL, test.west.FULL, "Naive"),
+  extract_metrics(ets.forecast.west.FULL, test.west.FULL, "ETS", ets.fit.west.FULL),
+  extract_metrics(arima.forecast.west.FULL, test.west.FULL, "ARIMA", arima.fit.west.FULL),
+  extract_metrics(nnetar.forecast.west.FULL, test.west.FULL, "NNETAR")
+) %>% add_column(Region = "West", .before = 1)
+
+accuracy_summary_FULL <- bind_rows(midwest_FULL_acc, northeast_FULL_acc, south_FULL_acc, west_FULL_acc)
+
+print("=========================================================")
+print("### FINAL ACCURACY SUMMARY (Train: 1976-01 to 2020-12 | Test: 2021-01 onwards) ###")
+print(accuracy_summary_FULL)
+print("=========================================================")
+
+
+# --- Model Selection (Winner) ---
+best_models_FULL <- accuracy_summary_FULL %>%
+  group_by(Region) %>%
+  arrange(MASE, MAPE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(Region, Model, MASE, MAPE)
+
+print("--- WINNING MODEL PER REGION (Full Data Forecast) ---")
+print(best_models_FULL)
+
+
+# =========================================================================
+## 6. Forecasting Plots (Four Separate Regional Overlay Plots)
+# =========================================================================
+
+# @title Helper function to combine and plot all four models for one region
+create_regional_overlay_plot <- function(train_data, test_data, 
+                                       naive_fc, ets_fc, arima_fc, nnetar_fc, 
+                                       region_name) {
+  
+  p <- autoplot(train_data) +
+    # Use window() to ensure test data is plotted correctly
+    autolayer(test_data, series = "Actual Test", linewidth = 1.2, alpha = 0.8) +
+    
+    # Add all four model forecasts
+    autolayer(naive_fc, series = "Naive Forecast", PI = FALSE) + 
+    autolayer(ets_fc, series = "ETS Forecast", PI = FALSE) +     
+    autolayer(arima_fc, series = "ARIMA Forecast", PI = TRUE, level = 95) + 
+    autolayer(nnetar_fc, series = "NNETAR Forecast", PI = TRUE, level = 95) + 
+    
+    # Styling and Labels
+    ggtitle(paste("Forecast Comparison for the", region_name, "Region (Test: 2021-01 onwards)")) +
+    xlab("Year") + ylab("Unemployment Rate (%)") +
+    guides(colour = guide_legend(title = "Series"),
+           fill = guide_legend(title = "Prediction Interval")) +
+    theme_minimal() +
+    theme(legend.position = "bottom", 
+          legend.title = element_text(size = 10, face = "bold"),
+          plot.title = element_text(size = 14, face = "bold"))
+  
+  return(p)
+}
+
+# --- 1. Midwest Plot ---
+P_Midwest_Overlay <- create_regional_overlay_plot(
+  train.midwest.FULL, test.midwest.FULL, 
+  naive.forecast.midwest.FULL, ets.forecast.midwest.FULL, 
+  arima.forecast.midwest.FULL, nnetar.forecast.midwest.FULL, 
+  "Midwest"
+)
+print(P_Midwest_Overlay)
+
+# --- 2. Northeast Plot ---
+P_Northeast_Overlay <- create_regional_overlay_plot(
+  train.northeast.FULL, test.northeast.FULL, 
+  naive.forecast.northeast.FULL, ets.forecast.northeast.FULL, 
+  arima.forecast.northeast.FULL, nnetar.forecast.northeast.FULL, 
+  "Northeast"
+)
+print(P_Northeast_Overlay)
+
+# --- 3. South Plot ---
+P_South_Overlay <- create_regional_overlay_plot(
+  train.south.FULL, test.south.FULL, 
+  naive.forecast.south.FULL, ets.forecast.south.FULL, 
+  arima.forecast.south.FULL, nnetar.forecast.south.FULL, 
+  "South"
+)
+print(P_South_Overlay)
+
+# --- 4. West Plot ---
+P_West_Overlay <- create_regional_overlay_plot(
+  train.west.FULL, test.west.FULL, 
+  naive.forecast.west.FULL, ets.forecast.west.FULL, 
+  arima.forecast.west.FULL, nnetar.forecast.west.FULL, 
+  "West"
+)
+print(P_West_Overlay)
+
+# --- Combine all four final plots into a 2x2 grid for presentation ---
+(P_Midwest_Overlay + P_Northeast_Overlay) / 
+(P_South_Overlay + P_West_Overlay) +
+  plot_annotation(title = 'Regional Forecast Summary: Models Trained on Data Before 2021', 
+                  subtitle = 'Comparing Forecasts vs. Actual Data from 2021-01 onwards',
+                  theme = theme(plot.title = element_text(size = 18, face = "bold")))
+```
+
+## 9. Model Assumptions Check (Revisited)
+
+### 9.1. ARIMA Model Diagnosis
+
+```{r check_arima_assumptions, fig.height=8, fig.width=10}
+# Check assumptions for the fitted ARIMA model (e.g., Midwest, Segment 3)
+# This function generates 4 plots and performs the Ljung-Box test.
+checkresiduals(arima.fit.midwest.FULL)
+```
+
+### 9.2. ETS Model Diagnostics
+
+```{r check_ets_assumptions, fig.height=8, fig.width=10}
+# Check assumptions for the fitted ETS model (e.g., Midwest, Segment 3)
+checkresiduals(ets.fit.midwest.FULL)
+```
+
+### 9.3. Naive Model Diagnostics (White Noise Check)
+
+```{r check_naive_assumptions}
+# Check residuals for the Naive model fit
+checkresiduals(naive.forecast.midwest.FULL)
+```
+
